@@ -1,8 +1,7 @@
-***
-
+---
 name: fetch-xiaohongshu
 description: "Fetch xiaohongshu (小紅書) post content and images using OpenClaw browser with canvas extraction. Returns structured data: title, author, desc, tags, and local image file paths. Does NOT upload to MinIO. Atomic skill for xiaohongshu extraction. Trigger keywords: 小紅書, xiaohongshu, xhslink, 紅書."
---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+---
 
 # Fetch Xiaohongshu — 小紅書擷取原子技能
 
