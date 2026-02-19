@@ -100,14 +100,17 @@ ls -lh /tmp/xhs_img_N.webp
 action: click, ref: <右側箭頭的 ref>
 ```
 
-**方法二（備用，若方法一無效）**：用 Swiper API 直接跳頁（N 為目標頁，從 0 開始）：
+**方法二（備用，若方法一無效）**：用 Swiper API 直接跳頁（N 為目標頁索引，從 0 開始）：
 
 ```bash
 openclaw browser evaluate --browser-profile openclaw \
   --fn "() => { const s = document.querySelector('.swiper')?.swiper; s && s.slideTo(N); return s?.realIndex; }"
+# 切換後必須等待 1 秒讓圖片完全載入，再執行 canvas 擷取
+sleep 1
 ```
 
-> 判斷是否成功切換：下次 canvas 擷取的圖片檔案大小應與上一張**不同**。若大小相同，表示仍是同一張，需再嘗試切換。
+> ⚠️ `sleep 0.5` 不夠：Swiper 動畫 + 圖片載入需要至少 1 秒，否則 canvas 會抓到上一張的殘影（相同圖片）。
+> 判斷是否成功切換：擷取後用 `ls -lh` 確認檔案大小與上一張**不同**。若相同，再 sleep 0.5 後重新擷取一次。
 
 **4c. 重複 4a + 4b 直到所有 `imageCount` 張擷取完畢**
 
