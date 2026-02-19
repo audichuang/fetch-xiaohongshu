@@ -1,13 +1,13 @@
 ---
 name: fetch-xiaohongshu
-description: "Fetch xiaohongshu (小紅書) post content and images using OpenClaw browser with canvas extraction. Returns structured data: title, author, desc, tags, and local image file paths. Does NOT upload to MinIO. Atomic skill for xiaohongshu extraction. Trigger keywords: 小紅書, xiaohongshu, xhslink, 紅書."
+description: "Fetch xiaohongshu (小紅書) post content and images using OpenClaw browser. Fast path: parallel curl from img.currentSrc (~1 sec for 22 imgs). Fallback: canvas extraction per image. Returns structured data: title, author, desc, tags, and local image file paths. Does NOT upload to MinIO. Atomic skill for xiaohongshu extraction. Trigger keywords: 小紅書, xiaohongshu, xhslink, 紅書."
 ---
 
 # Fetch Xiaohongshu — 小紅書擷取原子技能
 
 從小紅書貼文擷取文字 metadata 與圖片，將圖片存至本機暫存，回傳結構化資料。
 
-> **這是原子技能**：只負責「抓取」——metadata 萃取 + Canvas 圖片下載到本機。
+> **這是原子技能**：只負責「抓取」——metadata 萃取 + 圖片下載到本機（優先 curl 並行，備用 Canvas）。
 > **不負責**：圖片讀取解析、MinIO 上傳、內容整合、存入 Obsidian。
 
 ## 輸入
@@ -31,7 +31,9 @@ description: "Fetch xiaohongshu (小紅書) post content and images using OpenCl
 
 ## 技術背景
 
-* **為何用 Canvas 擷取圖片**：小紅書 CDN (`sns-webpic-qc.xhscdn.com`) 無 CORS header，fetch/XHR 被瀏覽器阻擋；但 CDP `evaluate` 不強制 canvas taint policy，已載入的 `<img>` 可直接畫到 canvas 取得 base64。
+* **快速路徑（curl）**：`img.currentSrc` 的完整 CDN URL（含 `!nd_dft_wlteh_webp_3` suffix）可直接 curl 下載，只需 `Referer` + `User-Agent` header，不需 cookie。22 張並行 ~0.5-1 秒（vs 舊 Canvas 55 秒）。
+* **⚠️ URL 來源**：必須用 `img.currentSrc`（含 suffix）；`__INITIAL_STATE__` 的 URL 去掉 suffix 後會 403。
+* **備用路徑（Canvas）**：小紅書 CDN 無 CORS header，fetch/XHR 被瀏覽器阻擋；但 CDP `evaluate` 不強制 canvas taint policy，已載入的 `<img>` 可直接畫到 canvas 取得 base64。
 * **為何用 openclaw profile**：CDP 直連，不透過 Chrome Extension relay，更穩定。
 
 ## 工作流程
@@ -69,52 +71,76 @@ openclaw browser evaluate --browser-profile openclaw \
 
 > 若 `type == "video"` → 跳過步驟 4，回傳 `localFiles: []`。
 
-### 步驟 4：逐張擷取圖片（Canvas → 本機存檔）
+### 步驟 4：擷取圖片（快速路徑 curl → 備用 Canvas）
 
-> 🚨 **嚴格禁止**：不可用一個 JS 一次回傳多張圖片的 base64（例如 async loop 回傳陣列）。
-> 每次 `browser evaluate` 只能回傳**一張**圖片的 base64，否則 tool result 過大會導致 context overflow，整個 session 被 terminate。
-
-對每張圖片（共 `imageCount` 張），**一張一張**執行完整循環：
-
-**4a. Canvas 擷取當前這張 → 用 exec 存檔**
+#### 步驟 4A：取得 URL 陣列（僅字串，極小）
 
 ```bash
-# 1. evaluate 只回傳當前這一張的 base64，立刻用 Python 解碼存檔
 openclaw browser evaluate --browser-profile openclaw \
-  --fn "$(cat ~/skills/fetch-xiaohongshu/scripts/extract_canvas.js)" \
-  | python3 -c "import sys,base64; open('/tmp/xhs_img_N.webp','wb').write(base64.b64decode(sys.stdin.read().strip()))"
-
-# 2. 驗證（只看 size，不印出 base64）
-ls -lh /tmp/xhs_img_N.webp
+  --fn "$(cat ~/skills/fetch-xiaohongshu/scripts/extract_image_urls.js)"
 ```
 
-> ⚠️ 不要用 `base64 -d`，會因換行符號報「輸入無效」。請用 Python `base64.b64decode` 解碼。
+回傳 JSON 陣列，例如：
+```json
+["https://sns-webpic-qc.xhscdn.com/.../photo_1!nd_dft_wlteh_webp_3", "..."]
+```
 
-將 `N` 替換為當前圖片序號（1, 2, 3...）。
+> 若回傳的 URL 數量少於 `imageCount`，表示部分圖片尚未載入（在輪播後方）。此時先用已有 URL 下載，再對缺少的張數用步驟 4C Canvas 補抓。
 
-**4b. 切換到下一張（若還有下一張）**
+#### 步驟 4B：並行 curl 下載（快速路徑，~0.5-1 秒）
 
-**方法一（優先）**：取得 snapshot，找投影片計數器（如 `generic: 1/5`），點擊計數器右側的箭頭按鈕：
+將步驟 4A 的 JSON 陣列存為 `URLS` 變數，執行：
 
+```bash
+bash ~/skills/fetch-xiaohongshu/scripts/download_images.sh '$URLS' /tmp/xhs_img
+```
+
+輸出範例（全部成功）：
+```
+OK 1: 87K
+OK 2: 93K
+OK 3: 71K
+...
+```
+
+**驗證**：若所有行均為 `OK` 且大小 > 10K → **完成，跳過步驟 4C**。
+
+若有 `FAIL`（大小 < 10KB），記錄失敗的序號，對這些圖用步驟 4C 補抓。
+
+#### 步驟 4C：Canvas 補抓（備用，僅對失敗張數）
+
+> 🚨 **嚴格禁止**：每次 `browser evaluate` 只能回傳**一張**圖片的 base64，否則 tool result 過大導致 context overflow。
+
+對每張需補抓的圖片，**一張一張**執行：
+
+**4C-a. 切換到目標頁（若非第一張）**
+
+**方法一（優先）**：取得 snapshot，找投影片計數器（如 `generic: 1/5`），點擊右側箭頭按鈕：
 ```
 action: click, ref: <右側箭頭的 ref>
 ```
 
-**方法二（備用，若方法一無效）**：用 Swiper API 直接跳頁（N 為目標頁索引，從 0 開始）：
-
+**方法二（備用）**：Swiper API 直接跳頁（N 為目標頁索引，從 0 開始）：
 ```bash
 openclaw browser evaluate --browser-profile openclaw \
   --fn "() => { const s = document.querySelector('.swiper')?.swiper; s && s.slideTo(N); return s?.realIndex; }"
-# 切換後必須等待 1 秒讓圖片完全載入，再執行 canvas 擷取
 sleep 1
 ```
+> ⚠️ `sleep 0.5` 不夠：Swiper 動畫 + 圖片載入需要至少 1 秒。
 
-> ⚠️ `sleep 0.5` 不夠：Swiper 動畫 + 圖片載入需要至少 1 秒，否則 canvas 會抓到上一張的殘影（相同圖片）。
-> 判斷是否成功切換：擷取後用 `ls -lh` 確認檔案大小與上一張**不同**。若相同，再 sleep 0.5 後重新擷取一次。
+**4C-b. Canvas 擷取 → 存檔**
 
-**4c. 重複 4a + 4b 直到所有 `imageCount` 張擷取完畢**
+```bash
+openclaw browser evaluate --browser-profile openclaw \
+  --fn "$(cat ~/skills/fetch-xiaohongshu/scripts/extract_canvas.js)" \
+  | python3 -c "import sys,base64; open('/tmp/xhs_img_N.webp','wb').write(base64.b64decode(sys.stdin.read().strip()))"
 
-> 每張圖約 60-110KB，13 張全部一起回傳 ≈ 1.3MB base64 → context 爆炸。**一定要一張一張來。**
+ls -lh /tmp/xhs_img_N.webp
+```
+
+> ⚠️ 不要用 `base64 -d`，會因換行符號報「輸入無效」。請用 Python `base64.b64decode`。
+
+**4C-c. 重複直到所有失敗張數補抓完畢**
 
 ### 步驟 5：回傳結構化資料
 
@@ -136,4 +162,6 @@ sleep 1
 | `imageCount == 0` | 純文字貼文，跳過步驟 4，`localFiles: []` |
 | `imageCount == 1` | 只擷取一張，不需要點擊切換 |
 | `type == "video"` | 不支援，`localFiles: []`，desc 填入內容 |
+| curl 下載後 FAIL | 對失敗張數用步驟 4C Canvas 補抓 |
+| 4A 回傳 URL 少於 imageCount | 先下載已有 URL，缺少的張數滾動輪播後再跑 4A 或用 4C 補 |
 | Canvas 回傳 `{"error": ...}` | 記錄錯誤，繼續嘗試下一張 |
