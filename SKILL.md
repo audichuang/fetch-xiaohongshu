@@ -20,11 +20,16 @@ description: "Fetch xiaohongshu (小紅書) post content and images using OpenCl
 {
   "title": "貼文標題",
   "author": "作者名稱",
-  "content": "文字內容（desc 欄位）",
+  "desc": "貼文說明文字（__INITIAL_STATE__ 的 desc 欄位）",
   "tags": ["標籤1", "標籤2"],
-  "images": ["http://minio/img1.webp", "http://minio/img2.webp"]
+  "imageCount": 5,
+  "images": ["http://minio/img1.webp", "http://minio/img2.webp"],
+  "localFiles": ["/tmp/xhs_img_1.webp", "/tmp/xhs_img_2.webp"]
 }
 ```
+
+> 此技能**不負責**解讀圖片內容或撰寫摘要。圖片讀取與內容整合由呼叫方（編排技能）負責。
+> `localFiles` 讓呼叫方可以用 Read 工具視覺讀取每張圖片的原始內容。
 
 ## 技術背景
 
@@ -74,7 +79,7 @@ openclaw browser evaluate --browser-profile openclaw \
 
 對每張圖片（共 `imageCount` 張）執行：
 
-**4a. 擷取當前顯示圖片（Canvas → base64 → 存檔）**
+**4a. Canvas 擷取 → 存檔**
 
 ```bash
 RESULT=$(openclaw browser evaluate --browser-profile openclaw \
@@ -106,7 +111,7 @@ doppler run -p minio -c dev -- python3 ~/skills/uploading-to-minio/scripts/uploa
 
 回傳 JSON 陣列，提取每個物件的 `url` 欄位。
 
-### 步驟 6：組裝並回傳結構化資料
+### 步驟 6：回傳結構化資料
 
 整合步驟 3 的 metadata + 步驟 5 的圖片 URL，回傳：
 
@@ -114,11 +119,15 @@ doppler run -p minio -c dev -- python3 ~/skills/uploading-to-minio/scripts/uploa
 {
   "title": "...",
   "author": "...",
-  "content": "...",
+  "desc": "...",
   "tags": [...],
-  "images": ["http://minio/...", ...]
+  "imageCount": 5,
+  "images": ["http://minio/...", ...],
+  "localFiles": ["/tmp/xhs_img_1.webp", "/tmp/xhs_img_2.webp", ...]
 }
 ```
+
+`localFiles` 為本機暫存路徑，呼叫方可用 `Read` 工具讀取圖片內容。
 
 ## 特殊情況
 
