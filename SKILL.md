@@ -71,14 +71,23 @@ openclaw browser evaluate --browser-profile openclaw \
 
 ### 步驟 4：逐張擷取圖片（Canvas → 本機存檔）
 
-對每張圖片（共 `imageCount` 張）執行：
+> 🚨 **嚴格禁止**：不可用一個 JS 一次回傳多張圖片的 base64（例如 async loop 回傳陣列）。
+> 每次 `browser evaluate` 只能回傳**一張**圖片的 base64，否則 tool result 過大會導致 context overflow，整個 session 被 terminate。
 
-**4a. Canvas 擷取 → 存檔**
+對每張圖片（共 `imageCount` 張），**一張一張**執行完整循環：
+
+**4a. Canvas 擷取當前這張 → 用 exec 存檔**
 
 ```bash
+# 1. evaluate 只回傳當前這一張的 base64
 RESULT=$(openclaw browser evaluate --browser-profile openclaw \
   --fn "$(cat ~/skills/fetch-xiaohongshu/scripts/extract_canvas.js)")
+
+# 2. 立刻用 exec 存到磁碟（base64 不留在 context 裡）
 echo "$RESULT" | base64 -d > /tmp/xhs_img_N.webp
+
+# 3. 驗證（只看 size，不印出 base64）
+ls -lh /tmp/xhs_img_N.webp
 ```
 
 將 `N` 替換為當前圖片序號（1, 2, 3...）。
@@ -94,6 +103,8 @@ action: click, ref: <右側箭頭的 ref>
 > 投影片區通常有兩個箭頭（上一張/下一張），選計數器右側那個。
 
 **4c. 重複 4a + 4b 直到所有 `imageCount` 張擷取完畢**
+
+> 每張圖約 60-110KB，13 張全部一起回傳 ≈ 1.3MB base64 → context 爆炸。**一定要一張一張來。**
 
 ### 步驟 5：回傳結構化資料
 
